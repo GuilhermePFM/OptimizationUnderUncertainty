@@ -76,7 +76,8 @@ mutable struct AvgCut <:AbstractCut
     cte::Float64 # b (cte)
     ang_coef::Float64 # a (angular coefficient)
 end
-mutable struct BendersAlgorithm
+import Base
+Base.@kwdef mutable struct BendersAlgorithm
     UB::Float64
     LB::Float64
     ϵ::Float64
@@ -96,6 +97,7 @@ mutable struct BendersAlgorithm
     cuts::Dict{Int64,Vector{Cut}}
 
     BendersAlgorithm(e::Float64, first_stage, second_stage, c::Vector{Float64}, q::Vector{Float64}, r::Vector{Float64}) = new(Inf, -Inf, e, first_stage, second_stage, c, q, r, [], [], (0,0), true, Dict() )
+    BendersAlgorithm(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts) = new(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts)
 end
 
 mutable struct Convergence 
@@ -103,39 +105,34 @@ mutable struct Convergence
     computational::Bool
     Convergence() = new(false, false)
 end
-function total_cost(benders::BendersAlgorithm)
-    last_sol = benders.solutions[end]
+function total_cost(first_stage::firstStageSolution, second_stage::Vector{secondStageSolution})
 
-    first_stage_cost = benders.c' * last_sol.first_stage.x
+    first_stage_cost = sum(benders.c' * first_stage.x)
 
-    second_stage_cost = sum(benders.q' *i.y + benders.r' * i.w for i in last_sol.second_stage) / length(last_sol.second_stage)
+    # second_stage_cost = sum(benders.q' *i.y + benders.r' * i.w for i in last_sol.second_stage) / length(last_sol.second_stage)
+    Eqx = sum(i.Qx for i in second_stage) / length(second_stage)
 
-    total_cost = first_stage_cost + second_stage_cost
+    total_expected_cost = first_stage_cost + Eqx
 
-    return sum(total_cost)
+    return total_expected_cost
 end
 
-function cut_algorithm(benders::BendersAlgorithm, first_stage::firstStageSolution, second_stage::secondStageSolution, s)
-    conv = Convergence()
-    if abs(benders.UB - benders.LB) <= benders.ϵ
-        # end here
-        # computational convergence
-        print("Computational convergence")
-        conv.computational = true
+function cut_algorithm!(benders::BendersAlgorithm, first_stage::firstStageSolution, second_stage::secondStageSolution, s)
     # elseif second_stage.Qx == first_stage.zbar
     #     # c) check theorical convergence
     #     # end here
     #     # theoretical convergence
     #     print("theoretical convergence")
     #     conv.theoretical = true
-    elseif second_stage.Qx == Inf
+    if second_stage.Qx == Inf
         # step 4 add ray cut (feasibility)
         get_feasibility_cut!(benders, second_stage)
     else
         # add cut 
         get_optimality_cut!(benders, first_stage, second_stage, s)
     end
-    return conv
+
+    return nothing
 end
 
 function get_optimality_cut!(benders, first_stage::firstStageSolution, second_stage::secondStageSolution, s)
@@ -199,17 +196,22 @@ function update!(benders::BendersAlgorithm, sol::Solution)
     # update vector of solutions
     push!(benders.solutions, sol)
 
-    Eqx = sum(i.Qx for i in sol.second_stage) / length(sol.second_stage)
+    # calculate total expected cost
+    total_expected_cost = total_cost(sol.first_stage, sol.second_stage)
+
     # update UB and best solution
-    if Eqx > sol.first_stage.zbar
-        if total_cost(benders) < benders.UB
-            benders.UB = total_cost(benders)
-            benders.best_solution = (sol.first_stage.x, sol.second_stage)
-        end
+    if total_expected_cost < benders.UB
+        benders.UB = total_expected_cost
+        benders.best_solution = (sol.first_stage.x, sol.second_stage)
     end
     return nothing
 end
 
+function get_conv(benders::BendersAlgorithm)
+    conv = abs(benders.UB - benders.LB) <= benders.ϵ
+
+    return conv
+end
 function iteration!(benders::BendersAlgorithm)
         # step 2
         sol1 = benders.first_stage(benders)
@@ -223,7 +225,7 @@ function iteration!(benders::BendersAlgorithm)
             sol2 = benders.second_stage(sol1.x, d)
 
             # b) if Q(x) > zbar, update upper bound
-            converged = cut_algorithm(benders, sol1, sol2,s)
+            converged = cut_algorithm!(benders, sol1, sol2,s)
 
             push!(conv, converged)
             push!(scenario_sol, sol2)
@@ -232,13 +234,16 @@ function iteration!(benders::BendersAlgorithm)
         update!(benders, Solution(sol1, scenario_sol))
 
         # check convergence
-        theoretical_convergence = all([i.theoretical for i in conv])
-        computational_convergence = any([i.computational for i in conv])
-        convergence = theoretical_convergence || computational_convergence
+        convergence = get_conv(benders)
+
+        # check convergence
+        # theoretical_convergence = all([i.theoretical for i in conv])
+        # computational_convergence = any([i.computational for i in conv])
+        # convergence = theoretical_convergence || computational_convergence
     return convergence
 end
 
-function benders_algorithm(first_stage, second_stage, D)
+function benders_algorithm(first_stage, second_stage, D, avgcut=true)
     # step 1
     # UB = Inf
     # LB = -Inf
@@ -246,40 +251,37 @@ function benders_algorithm(first_stage, second_stage, D)
     c=10.0
     q=-25.0
     r=-5.0
-    benders = BendersAlgorithm(e, first_stage, second_stage, [c], [q], [r])
+    benders= BendersAlgorithm(Inf, -Inf, e, first_stage, second_stage, [c], [q], [r], [], [], (0,0), avgcut, Dict())
+    # benders = BendersAlgorithm(e, first_stage, second_stage, [c], [q], [r])
     benders.scenarios = D
     maxit = 10
-    I = []
     for i in 1:maxit
-        # converged = iteration!(benders)
          # step 2
          sol1 = benders.first_stage(benders)
          benders.LB = sol1.obj_value
 
          # step 3
          # a)
-         conv2 = []
          scenario_sol = []
          for (s,d) in enumerate(benders.scenarios)
              sol2 = benders.second_stage(sol1.x, d)
  
              # b) if Q(x) > zbar, update upper bound
-             converged = cut_algorithm(benders, sol1, sol2, s)
-             push!(conv2, converged)
+             cut_algorithm!(benders, sol1, sol2, s)
              push!(scenario_sol, sol2)
-
         end
          # update best solution
          update!(benders, Solution(sol1, scenario_sol))
 
-         # check convergence
-         theoretical_convergence = all([i.theoretical for i in conv2])
-         computational_convergence = any([i.computational for i in conv2])
-         converged = theoretical_convergence || computational_convergence
+        # check convergence
+        converged = false
+        if i > 1
+            converged = get_conv(benders)
+        end
 
-        if converged
-            print("Benders converged")
-            return benders, collect(1:i-1)
+        if converged 
+            print("Benders converged in $i iterations")
+            return benders, i
         end
     end
 end
@@ -335,10 +337,18 @@ end
 
 D = sim_scenarios(100)
 Qx, X = compute_Q(D)
-benders, I = benders_algorithm(first_stage, second_stage,D)
-# graph = plot(X, Qx, title = "Question 2) Benders on Q(x)", seriestype = :scatter)
+benders, it = benders_algorithm(first_stage, second_stage,D, false)
+
+# graph = plot(X, Qx, title = "Question 2) Benders on Q(x)")
 # xlabel!("x")
 # ylabel!("Q(x)")
+Tx = Qx .+ 10*X
+graph = plot(X, Tx, title = "Question 2) Benders on T(x)")
+xlabel!("x")
+ylabel!("T(x)")
+tmin, i = findmin(Tx)
+xmin = X[i]
+sum(D)/100
 # for i in 1:7
 #     newcut = get_avg_cut(benders, i)
 #     cut_line = [newcut.cte + newcut.ang_coef*x for x in X]
