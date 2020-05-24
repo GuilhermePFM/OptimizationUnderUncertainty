@@ -76,6 +76,7 @@ mutable struct AvgCut <:AbstractCut
     cte::Float64 # b (cte)
     ang_coef::Float64 # a (angular coefficient)
 end
+
 import Base
 Base.@kwdef mutable struct BendersAlgorithm
     UB::Float64
@@ -95,22 +96,18 @@ Base.@kwdef mutable struct BendersAlgorithm
 
     avgcut::Bool
     cuts::Dict{Int64,Vector{Cut}}
+    probability::Vector{Float64}
 
-    BendersAlgorithm(e::Float64, first_stage, second_stage, c::Vector{Float64}, q::Vector{Float64}, r::Vector{Float64}) = new(Inf, -Inf, e, first_stage, second_stage, c, q, r, [], [], (0,0), true, Dict() )
-    BendersAlgorithm(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts) = new(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts)
+    BendersAlgorithm(e::Float64, first_stage, second_stage, c::Vector{Float64}, q::Vector{Float64}, r::Vector{Float64}, probability) = new(Inf, -Inf, e, first_stage, second_stage, c, q, r, [], [], (0,0), true, Dict(), probability)
+    BendersAlgorithm(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts, probability) = new(UB, LB, e, first_stage, second_stage, c, q, r, scenarios, solutions, best_solution, avgcut, cuts, probability)
 end
 
-mutable struct Convergence 
-    theoretical::Bool
-    computational::Bool
-    Convergence() = new(false, false)
-end
-function total_cost(first_stage::firstStageSolution, second_stage::Vector{secondStageSolution})
+function total_cost(first_stage::firstStageSolution, second_stage::Vector{secondStageSolution}, probability)
 
     first_stage_cost = sum(benders.c' * first_stage.x)
 
     # second_stage_cost = sum(benders.q' *i.y + benders.r' * i.w for i in last_sol.second_stage) / length(last_sol.second_stage)
-    Eqx = sum(i.Qx for i in second_stage) / length(second_stage)
+    Eqx = sum(sol2.Qx * probability[i] for (i,sol2) in enumerate(second_stage))
 
     total_expected_cost = first_stage_cost + Eqx
 
@@ -149,6 +146,7 @@ function get_optimality_cut!(benders, first_stage::firstStageSolution, second_st
 
     return nothing
 end
+
 function get_feasibility_cut!(benders, second_stage::secondStageSolution)
    #todo
 end
@@ -165,16 +163,19 @@ function get_avg_cut(benders::BendersAlgorithm, c::I) where I<:Number
     end
     return AvgCut(cte, ang_coef)
 end
+
 function add_cut!(m, cut::T) where T<: AbstractCut
     x = m[:x]
     z = m[:z]
     @constraint(m, cut.cte + cut.ang_coef * x <= z)
 end
+
 function add_cut!(m, cut::T, k) where T<: AbstractCut
     x = m[:x]
     z = m[:z]
     @constraint(m, cut.cte + cut.ang_coef * x <= z[k])
 end
+
 function add_cuts!(m, benders::BendersAlgorithm)
     if benders.avgcut
         ncut = length(benders.cuts[1])
@@ -197,7 +198,7 @@ function update!(benders::BendersAlgorithm, sol::Solution)
     push!(benders.solutions, sol)
 
     # calculate total expected cost
-    total_expected_cost = total_cost(sol.first_stage, sol.second_stage)
+    total_expected_cost = total_cost(sol.first_stage, sol.second_stage, benders.probability)
 
     # update UB and best solution
     if total_expected_cost < benders.UB
@@ -221,7 +222,9 @@ function benders_algorithm(first_stage, second_stage, D, avgcut=true)
     c=10.0
     q=-25.0
     r=-5.0
-    benders= BendersAlgorithm(Inf, -Inf, e, first_stage, second_stage, [c], [q], [r], [], [], (0,0), avgcut, Dict())
+    ncen = length(D)
+    probability = [1/ncen for i in 1:ncen]
+    benders = BendersAlgorithm(Inf, -Inf, e, first_stage, second_stage, [c], [q], [r], [], [], (0,0), avgcut, Dict(), probability)
     # benders = BendersAlgorithm(e, first_stage, second_stage, [c], [q], [r])
     benders.scenarios = D
     maxit = 10
@@ -263,17 +266,21 @@ function first_stage(benders::BendersAlgorithm)
 
     m = JuMP.Model(Clp.Optimizer)
     @variable(m, 0<=x<=u)
-    ncut = 1
+    ncen = 1
     if benders.avgcut
         @variable(m, z)
     else
-        ncut = length(keys(benders.cuts))
-        @variable(m, z[i=1:ncut])
+        ncen = length(benders.probability)
+        @variable(m, z[i=1:ncen])
     end
 
     if length(benders.cuts) > 0
         add_cuts!(m, benders)
-        @objective(m, Min, c*x + sum(z)/ncut)
+        if benders.avgcut
+            @objective(m, Min, c*x + z)
+        else
+            @objective(m, Min, c*x + sum(z[i] * benders.probability[i] for i in 1:ncen))
+        end
     else
         @objective(m, Min, c*x)
     end
@@ -283,9 +290,15 @@ function first_stage(benders::BendersAlgorithm)
     termination_status(m)
     value.(z)
     value(x)
-    zbar = sum(value.(z))/ncut
+
+    if benders.avgcut
+        zbar = value(z)
+    else
+        zbar = sum(value(z[i]) * benders.probability[i] for i in 1:ncen)
+    end
     return firstStageSolution(value(x), zbar, objective_value(m))
 end
+
 function second_stage(x::Float64, d::Float64)
     r = -5
     q = -25
