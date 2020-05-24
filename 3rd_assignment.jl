@@ -212,36 +212,6 @@ function get_conv(benders::BendersAlgorithm)
 
     return conv
 end
-function iteration!(benders::BendersAlgorithm)
-        # step 2
-        sol1 = benders.first_stage(benders)
-        benders.LB = sol1.obj_value
-
-        # step 3
-        # a)
-        conv = []
-        scenario_sol = []
-        for (s,d) in enumerate(benders.scenarios)
-            sol2 = benders.second_stage(sol1.x, d)
-
-            # b) if Q(x) > zbar, update upper bound
-            converged = cut_algorithm!(benders, sol1, sol2,s)
-
-            push!(conv, converged)
-            push!(scenario_sol, sol2)
-        end
-        # update best solution
-        update!(benders, Solution(sol1, scenario_sol))
-
-        # check convergence
-        convergence = get_conv(benders)
-
-        # check convergence
-        # theoretical_convergence = all([i.theoretical for i in conv])
-        # computational_convergence = any([i.computational for i in conv])
-        # convergence = theoretical_convergence || computational_convergence
-    return convergence
-end
 
 function benders_algorithm(first_stage, second_stage, D, avgcut=true)
     # step 1
@@ -342,13 +312,15 @@ benders, it = benders_algorithm(first_stage, second_stage,D, false)
 # graph = plot(X, Qx, title = "Question 2) Benders on Q(x)")
 # xlabel!("x")
 # ylabel!("Q(x)")
-Tx = Qx .+ 10*X
-graph = plot(X, Tx, title = "Question 2) Benders on T(x)")
-xlabel!("x")
-ylabel!("T(x)")
-tmin, i = findmin(Tx)
-xmin = X[i]
-sum(D)/100
+
+# Total cost
+# Tx = Qx .+ 10*X
+# graph = plot(X, Tx, title = "Question 2) Benders on T(x)")
+# xlabel!("x")
+# ylabel!("T(x)")
+# tmin, i = findmin(Tx)
+# xmin = X[i]
+# sum(D)/100
 # for i in 1:7
 #     newcut = get_avg_cut(benders, i)
 #     cut_line = [newcut.cte + newcut.ang_coef*x for x in X]
